@@ -1,6 +1,7 @@
 package example.mobilegpsapp
 
 import android.Manifest
+import android.app.Activity
 import android.content.pm.PackageManager
 import android.location.Location
 import android.os.Bundle
@@ -28,31 +29,83 @@ import java.io.IOException
 
 class MainActivity : ComponentActivity() {
     private lateinit var fusedLocationClient: FusedLocationProviderClient
-    private val locationRequest = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 60000L)
-        .setMinUpdateIntervalMillis(5000L)
-        .build()
-
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
         Configuration.getInstance().load(applicationContext, getPreferences(MODE_PRIVATE))
         fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
 
         setContent {
             MaterialTheme {
-                GpsMapScreen(fusedLocationClient, locationRequest)
+                GpsMapScreen(fusedLocationClient)
             }
         }
     }
 }
 
 @Composable
-fun GpsMapScreen(fusedLocationClient: FusedLocationProviderClient, locationRequest: LocationRequest) {
+fun GpsMapScreen(fusedLocationClient: FusedLocationProviderClient) {
     val context = LocalContext.current
     var lastLocation by remember { mutableStateOf<Location?>(null) }
+    var isTracking by remember { mutableStateOf(false) }
 
-    Column(Modifier.fillMaxSize()) {
+    val locationCallback = remember {
+        object : LocationCallback() {
+            override fun onLocationResult(result: LocationResult) {
+                for (location in result.locations) {
+                    lastLocation = location
+                    sendToInflux(location)
+                }
+            }
+        }
+    }
+
+    val locationRequest = remember {
+        LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 60000L)
+            .setMinUpdateIntervalMillis(5000L)
+            .build()
+    }
+
+    LaunchedEffect(isTracking) {
+        if (isTracking) {
+            if (ActivityCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.ACCESS_FINE_LOCATION
+                ) != PackageManager.PERMISSION_GRANTED
+            ) {
+                ActivityCompat.requestPermissions(
+                    (context as Activity),
+                    arrayOf(Manifest.permission.ACCESS_FINE_LOCATION),
+                    1
+                )
+            } else {
+                fusedLocationClient.requestLocationUpdates(
+                    locationRequest,
+                    locationCallback,
+                    Looper.getMainLooper()
+                )
+            }
+        } else {
+            fusedLocationClient.removeLocationUpdates(locationCallback)
+        }
+    }
+
+    Column(
+        Modifier
+            .fillMaxSize()
+            .systemBarsPadding()
+    ) {
+        Row(Modifier
+            .padding(horizontal = 8.dp)
+            .weight(0.2f)
+        ){Button(
+            onClick = { (context as? Activity)?.finish() },
+            modifier = Modifier.padding(8.dp)
+        ) {
+            Text("Exit App")
+        }}
+
+
         AndroidView(factory = {
             MapView(context).apply {
                 setTileSource(TileSourceFactory.MAPNIK)
@@ -60,63 +113,42 @@ fun GpsMapScreen(fusedLocationClient: FusedLocationProviderClient, locationReque
             }
         }, modifier = Modifier
             .fillMaxWidth()
-            .weight(1f), update = { mapView ->
-            lastLocation?.let { loc ->
-                val point = GeoPoint(loc.latitude, loc.longitude)
-                mapView.controller.setZoom(15.0)
-                mapView.controller.setCenter(point)
-                val marker = Marker(mapView).apply {
-                    position = point
-                    title = "Here"
-                    setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
+            .weight(1f),
+            update = { mapView ->
+                lastLocation?.let { loc ->
+                    val point = GeoPoint(loc.latitude, loc.longitude)
+                    mapView.controller.setZoom(15.0)
+                    mapView.controller.setCenter(point)
+                    val marker = Marker(mapView).apply {
+                        position = point
+                        title = "Lat: ${loc.latitude}, Lon: ${loc.longitude}"
+                        setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
+                    }
+                    mapView.overlays.clear()
+                    mapView.overlays.add(marker)
+                    mapView.invalidate()
                 }
-                mapView.overlays.clear()
-                mapView.overlays.add(marker)
-                mapView.invalidate()
-            }
-        })
+            })
 
         Button(
-            onClick = {
-                if (ActivityCompat.checkSelfPermission(
-                        context,
-                        Manifest.permission.ACCESS_FINE_LOCATION
-                    ) != PackageManager.PERMISSION_GRANTED
-                ) {
-                    ActivityCompat.requestPermissions(
-                        (context as ComponentActivity),
-                        arrayOf(Manifest.permission.ACCESS_FINE_LOCATION),
-                        1
-                    )
-                } else {
-                    fusedLocationClient.requestLocationUpdates(
-                        locationRequest,
-                        object : LocationCallback() {
-                            override fun onLocationResult(result: LocationResult) {
-                                for (location in result.locations) {
-                                    lastLocation = location
-                                    sendToInflux(location)
-                                }
-                            }
-                        },
-                        Looper.getMainLooper()
-                    )
-                }
-            },
+            onClick = { isTracking = !isTracking },
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(16.dp)
         ) {
-            Text("Start Tracking")
+            Text(if (isTracking) "Stop Tracking" else "Start Tracking")
         }
     }
 }
 
 fun sendToInflux(location: Location) {
-    val influxUrl = "https://eu-central-1-1.aws.cloud2.influxdata.com/api/v2/write?org=SoloDev10xProgramer&bucket=MobileGPSapp&precision=s\n"
-    val token = "Your api token"
+    val influxUrl =
+        "https://eu-central-1-1.aws.cloud2.influxdata.com/api/v2/write?org=SoloDev10xProgramer&bucket=MobileGPSapp&precision=s"
+    val token =
+        "Your token"
 
-    val body = "gps,device=android latitude=${location.latitude},longitude=${location.longitude}"
+    val body =
+        "gps,device=android latitude=${location.latitude},longitude=${location.longitude}"
 
     val client = OkHttpClient()
     val request = Request.Builder()
